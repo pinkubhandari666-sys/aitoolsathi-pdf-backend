@@ -1,14 +1,25 @@
-AIToolSathi Ghostscript Backend - GitHub upload files
+AIToolSathi PDF Compression Backend
 
-Upload these four files directly into the ROOT of the NEW repository:
-- Dockerfile
-- main.py
-- requirements.txt
-- render.yaml
+Files:
+- main.py: FastAPI API for PDF compression using Ghostscript
+- Dockerfile: installs Ghostscript and starts Uvicorn
+- requirements.txt: Python dependencies
+- render.yaml: Render deployment configuration
 
-Then in Render choose New > Blueprint and connect this repository. render.yaml and Dockerfile are both at repository root.
-After deployment test: https://YOUR-RENDER-SERVICE.onrender.com/health
-Expected: {"ok":true,"engine":"Ghostscript","ghostscript":true}
+Deploy:
+1. Upload/replace these files in the GitHub repository root.
+2. Render will rebuild the existing Web Service from the repository.
+3. Wait until Render shows the service as Live/Deployed.
+4. Test /health. The response should show ghostscript: true.
+5. Test /docs -> POST /compress with a PDF.
 
-The API endpoint is POST /compress with multipart fields: file (PDF), mode (normal/high), target_kb (optional integer).
-Target size is not guaranteed. Inspect output quality, signatures, forms and QR codes before using in production.
+Compression behavior (v1.2.0):
+- Normal: quality-first profiles from 220 DPI / JPEG quality 92 down to 150 DPI / quality 85.
+- High: quality-first profiles from 300 DPI / JPEG quality 96 down to 200 DPI / quality 90.
+- The low-resolution /screen preset is no longer used.
+- Selectable text and vector objects are kept as PDF objects where Ghostscript can preserve them.
+- If target_kb is set, the API tries profiles from highest quality down and uses the first one that reaches the target. If none reaches it, it returns the best available quality and X-Target-Reached: false.
+- If compression would make the file larger, the original PDF is returned.
+
+Important:
+The target file size is not guaranteed. Scanned PDFs with many photos may need a larger output to preserve clarity. Always inspect the downloaded PDF before using or sharing it.

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: aitoolsathi-pdf-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://aitoolsathi.in,https://www.aitoolsathi.in
+      - key: MAX_UPLOAD_MB
+        value: "30"

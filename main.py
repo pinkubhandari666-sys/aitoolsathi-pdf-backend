@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-app = FastAPI(title="AIToolSathi PDF Compression API", version="1.4.0")
+app = FastAPI(title="AIToolSathi PDF Compression API", version="1.5.0")
 origins = [
     x.strip()
     for x in os.getenv(
@@ -55,7 +55,7 @@ def root():
         "service": "AIToolSathi PDF Compression API",
         "status": "ok",
         "engine": "Ghostscript",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "note": "Quality-first compression; selectable text and vector content are retained where possible.",
     }
 
@@ -68,7 +68,7 @@ def health():
 @app.post("/compress")
 async def compress_pdf(
     file: UploadFile = File(...),
-    mode: str = Form("normal"),
+    mode: str = Form("high"),
     target_kb: int = Form(0),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):

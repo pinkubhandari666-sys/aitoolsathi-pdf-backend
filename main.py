@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-app = FastAPI(title="AIToolSathi PDF Compression API", version="1.2.0")
+app = FastAPI(title="AIToolSathi PDF Compression API", version="1.3.0")
 origins = [
     x.strip()
     for x in os.getenv(
@@ -30,11 +30,14 @@ MAX_BYTES = int(os.getenv("MAX_UPLOAD_MB", "30")) * 1024 * 1024
 GS = os.getenv("GHOSTSCRIPT_BIN", "gs")
 
 # Profiles are ordered from best visual quality to stronger compression.
-# We intentionally avoid Ghostscript's /screen preset (typically 72-96 DPI),
-# which can make scanned certificates and small text look soft.
+# Avoid very low-resolution presets by default; the target-size ladder is
+# allowed to descend only to 90 DPI.
 PROFILES = {
-    "normal": [(220, 92), (200, 90), (180, 88), (150, 85)],
-    "high": [(300, 96), (250, 94), (220, 92), (200, 90)],
+    # Many scanned PDFs are already only 85-175 DPI. Profiles above their
+    # source resolution do not downsample them, so they barely reduce size.
+    # These ladders step down gradually while keeping text reasonably legible.
+    "normal": [(140, 92), (120, 90), (110, 88), (100, 85), (90, 82)],
+    "high": [(160, 95), (140, 93), (120, 90), (110, 88), (100, 85), (90, 82)],
 }
 
 
@@ -44,7 +47,7 @@ def root():
         "service": "AIToolSathi PDF Compression API",
         "status": "ok",
         "engine": "Ghostscript",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "note": "Quality-first compression; selectable text and vector content are retained where possible.",
     }
 
@@ -134,11 +137,12 @@ async def compress_pdf(
         if not outputs:
             raise HTTPException(422, "Could not optimize this PDF. Original file was not changed.")
 
-        # If no profile met the requested size, keep the largest successful
-        # output: it normally retains the most image detail. Report target_kb
-        # honestly instead of silently choosing a very low-resolution result.
+        # If no profile met the requested size, return the smallest successful
+        # profile (the closest safe result to the requested target), rather
+        # than accidentally returning the first/largest file. The response
+        # header still reports X-Target-Reached=false when the target is missed.
         if target_bytes and outputs[-1]["path"].stat().st_size > target_bytes:
-            candidate_info = max(outputs, key=lambda item: item["path"].stat().st_size)
+            candidate_info = min(outputs, key=lambda item: item["path"].stat().st_size)
         else:
             candidate_info = outputs[-1]
         candidate = candidate_info["path"]

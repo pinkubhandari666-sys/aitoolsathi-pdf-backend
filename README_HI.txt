@@ -1,25 +1,32 @@
-AIToolSathi PDF Compression Backend
+AIToolSathi PDF Compression Backend v1.3.0
 
 Files:
-- main.py: FastAPI API for PDF compression using Ghostscript
+- main.py: FastAPI PDF compression API using Ghostscript
 - Dockerfile: installs Ghostscript and starts Uvicorn
 - requirements.txt: Python dependencies
 - render.yaml: Render deployment configuration
 
 Deploy:
-1. Upload/replace these files in the GitHub repository root.
-2. Render will rebuild the existing Web Service from the repository.
-3. Wait until Render shows the service as Live/Deployed.
-4. Test /health. The response should show ghostscript: true.
+1. Replace the files in the ROOT of the existing GitHub backend repository.
+2. Commit the changes. Render Auto-Deploy should rebuild the existing service.
+3. Wait until Render shows Live/Deployed.
+4. Test /health; ghostscript must be true.
 5. Test /docs -> POST /compress with a PDF.
 
-Compression behavior (v1.2.0):
-- Normal: quality-first profiles from 220 DPI / JPEG quality 92 down to 150 DPI / quality 85.
-- High: quality-first profiles from 300 DPI / JPEG quality 96 down to 200 DPI / quality 90.
-- The low-resolution /screen preset is no longer used.
-- Selectable text and vector objects are kept as PDF objects where Ghostscript can preserve them.
-- If target_kb is set, the API tries profiles from highest quality down and uses the first one that reaches the target. If none reaches it, it returns the best available quality and X-Target-Reached: false.
+Compression:
+- Normal and High use a gradual image-resolution/JPEG-quality ladder.
+- The ladder is designed for scanned PDFs whose embedded images may already be around 85-175 DPI.
+- If target_kb is met, the first (highest-quality) profile that reaches it is returned.
+- If target_kb cannot be met without going below the quality floor, the smallest tested output is returned and X-Target-Reached is false.
 - If compression would make the file larger, the original PDF is returned.
+- The API does not guarantee a 500 KB output. For photo/scanned PDFs, 500 KB may require visibly lower resolution. Check legibility before using official documents.
 
-Important:
-The target file size is not guaranteed. Scanned PDFs with many photos may need a larger output to preserve clarity. Always inspect the downloaded PDF before using or sharing it.
+Response headers:
+- X-Original-Bytes
+- X-Compressed-Bytes
+- X-Target-Reached
+- X-Image-DPI
+- X-JPEG-Quality
+
+Note:
+Ghostscript may rewrite PDF internals and remove existing PDF encryption/permissions. Do not use this backend on password-protected or restricted files unless you have permission and have confirmed the output is acceptable.

@@ -1,4 +1,4 @@
-AIToolSathi PDF Compression Backend v1.5.0
+AIToolSathi PDF Compression Backend v1.6.0
 
 Files:
 - main.py: FastAPI PDF compression API using Ghostscript
@@ -13,15 +13,16 @@ Deploy:
 4. Test /health; ghostscript must be true.
 5. Test /docs -> POST /compress with a PDF.
 
-Compression:
-- High is now the API default when mode is omitted. Normal remains available when explicitly selected.
-- Normal and High use a gradual image-resolution/JPEG-quality ladder.
-- High v1.4 tries finer 170-220 DPI / higher JPEG-quality profiles first, so it can use more of an 800 KB target when possible.
-- The ladder is designed for scanned PDFs whose embedded images may already be around 85-175 DPI.
-- If target_kb is met, the first (highest-quality) profile that reaches it is returned.
-- If target_kb cannot be met without going below the quality floor, the smallest tested output is returned and X-Target-Reached is false.
+Changes in v1.6.0:
+- Ghostscript subprocess runs in a worker thread so the FastAPI event loop can continue answering /health.
+- A semaphore limits the service to one Ghostscript compression job at a time to protect the small Render free instance.
+- If no tested profile can meet the requested target, the API returns the highest-quality successful result and reports X-Target-Reached=false, rather than selecting the smallest/lowest-quality result.
+- Existing Normal/High profile settings and API form fields are preserved.
+
+Important:
+- Target KB is a maximum size goal, not a guarantee of an exact output size.
+- If the target cannot be reached without reducing quality too much, the response may be larger than the target. Check document legibility.
 - If compression would make the file larger, the original PDF is returned.
-- The API does not guarantee a 500 KB output. For photo/scanned PDFs, 500 KB may require visibly lower resolution. Check legibility before using official documents.
 
 Response headers:
 - X-Original-Bytes

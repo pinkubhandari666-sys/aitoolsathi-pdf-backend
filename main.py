@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-app = FastAPI(title="AIToolSathi PDF Compression API", version="1.5.0")
+app = FastAPI(title="AIToolSathi PDF Compression API", version="1.6.0")
 origins = [
     x.strip()
     for x in os.getenv(
@@ -27,6 +28,8 @@ app.add_middleware(
 )
 
 MAX_BYTES = int(os.getenv("MAX_UPLOAD_MB", "30")) * 1024 * 1024
+# Keep the small Render free instance from running multiple Ghostscript jobs at once.
+COMPRESSION_SEMAPHORE = asyncio.Semaphore(1)
 GS = os.getenv("GHOSTSCRIPT_BIN", "gs")
 
 # Profiles are ordered from best visual quality to stronger compression.
@@ -55,7 +58,7 @@ def root():
         "service": "AIToolSathi PDF Compression API",
         "status": "ok",
         "engine": "Ghostscript",
-        "version": "1.5.0",
+        "version": "1.6.0",
         "note": "Quality-first compression; selectable text and vector content are retained where possible.",
     }
 
@@ -68,7 +71,7 @@ def health():
 @app.post("/compress")
 async def compress_pdf(
     file: UploadFile = File(...),
-    mode: str = Form("high"),
+    mode: str = Form("normal"),
     target_kb: int = Form(0),
 ):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
@@ -94,63 +97,64 @@ async def compress_pdf(
     target_bytes = target_kb * 1024 if target_kb > 0 else 0
 
     try:
-        for idx, (dpi, jpeg_quality) in enumerate(PROFILES[mode]):
-            out = work / f"output-{idx}.pdf"
-            cmd = [
-                GS,
-                "-sDEVICE=pdfwrite",
-                "-dCompatibilityLevel=1.5",
-                "-dNOPAUSE",
-                "-dBATCH",
-                "-dSAFER",
-                "-dQUIET",
-                "-dDetectDuplicateImages=true",
-                "-dCompressFonts=true",
-                "-dSubsetFonts=true",
-                "-dAutoRotatePages=/None",
-                # /default avoids the aggressive /screen and /ebook presets.
-                "-dPDFSETTINGS=/default",
-                "-dDownsampleColorImages=true",
-                "-dColorImageDownsampleType=/Bicubic",
-                f"-dColorImageResolution={dpi}",
-                "-dColorImageFilter=/DCTEncode",
-                "-dAutoFilterColorImages=false",
-                "-dDownsampleGrayImages=true",
-                "-dGrayImageDownsampleType=/Bicubic",
-                f"-dGrayImageResolution={dpi}",
-                "-dGrayImageFilter=/DCTEncode",
-                "-dAutoFilterGrayImages=false",
-                f"-dJPEGQ={jpeg_quality}",
-                "-dDownsampleMonoImages=true",
-                "-dMonoImageDownsampleType=/Subsample",
-                "-dMonoImageResolution=300",
-                f"-sOutputFile={out}",
-                str(src),
-            ]
-            try:
-                run = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            except subprocess.TimeoutExpired:
-                continue
+        async with COMPRESSION_SEMAPHORE:
+            for idx, (dpi, jpeg_quality) in enumerate(PROFILES[mode]):
+                out = work / f"output-{idx}.pdf"
+                cmd = [
+                    GS,
+                    "-sDEVICE=pdfwrite",
+                    "-dCompatibilityLevel=1.5",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dSAFER",
+                    "-dQUIET",
+                    "-dDetectDuplicateImages=true",
+                    "-dCompressFonts=true",
+                    "-dSubsetFonts=true",
+                    "-dAutoRotatePages=/None",
+                    # /default avoids the aggressive /screen and /ebook presets.
+                    "-dPDFSETTINGS=/default",
+                    "-dDownsampleColorImages=true",
+                    "-dColorImageDownsampleType=/Bicubic",
+                    f"-dColorImageResolution={dpi}",
+                    "-dColorImageFilter=/DCTEncode",
+                    "-dAutoFilterColorImages=false",
+                    "-dDownsampleGrayImages=true",
+                    "-dGrayImageDownsampleType=/Bicubic",
+                    f"-dGrayImageResolution={dpi}",
+                    "-dGrayImageFilter=/DCTEncode",
+                    "-dAutoFilterGrayImages=false",
+                    f"-dJPEGQ={jpeg_quality}",
+                    "-dDownsampleMonoImages=true",
+                    "-dMonoImageDownsampleType=/Subsample",
+                    "-dMonoImageResolution=300",
+                    f"-sOutputFile={out}",
+                    str(src),
+                ]
+                try:
+                    run = await asyncio.to_thread(
+                        subprocess.run, cmd, capture_output=True, text=True, timeout=120
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
 
-            if run.returncode == 0 and out.exists() and out.stat().st_size > 0:
-                outputs.append({"path": out, "dpi": dpi, "quality": jpeg_quality})
-                # Profiles are quality-ordered. Stop at the first one that meets
-                # the requested size, preserving the best quality that can meet it.
-                if target_bytes and out.stat().st_size <= target_bytes:
-                    break
-                # Without a size target, the first successful profile is preferred.
-                if not target_bytes:
-                    break
-
+                if run.returncode == 0 and out.exists() and out.stat().st_size > 0:
+                    outputs.append({"path": out, "dpi": dpi, "quality": jpeg_quality})
+                    # Profiles are quality-ordered. Stop at the first one that meets
+                    # the requested size, preserving the best quality that can meet it.
+                    if target_bytes and out.stat().st_size <= target_bytes:
+                        break
+                    # Without a size target, the first successful profile is preferred.
+                    if not target_bytes:
+                        break
         if not outputs:
             raise HTTPException(422, "Could not optimize this PDF. Original file was not changed.")
 
-        # If no profile met the requested size, return the smallest successful
-        # profile (the closest safe result to the requested target), rather
-        # than accidentally returning the first/largest file. The response
-        # header still reports X-Target-Reached=false when the target is missed.
+        # Profiles are quality-ordered. If no profile reaches the target,
+        # preserve the first successful (highest-quality) result instead of
+        # choosing the smallest, potentially over-compressed output.
         if target_bytes and outputs[-1]["path"].stat().st_size > target_bytes:
-            candidate_info = min(outputs, key=lambda item: item["path"].stat().st_size)
+            candidate_info = outputs[0]
         else:
             candidate_info = outputs[-1]
         candidate = candidate_info["path"]

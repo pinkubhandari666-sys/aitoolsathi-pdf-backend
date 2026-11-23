@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-app = FastAPI(title="AIToolSathi PDF Compression API", version="1.3.0")
+app = FastAPI(title="AIToolSathi PDF Compression API", version="1.4.0")
 origins = [
     x.strip()
     for x in os.getenv(
@@ -37,7 +37,15 @@ PROFILES = {
     # source resolution do not downsample them, so they barely reduce size.
     # These ladders step down gradually while keeping text reasonably legible.
     "normal": [(140, 92), (120, 90), (110, 88), (100, 85), (90, 82)],
-    "high": [(160, 95), (140, 93), (120, 90), (110, 88), (100, 85), (90, 82)],
+    # High mode now tries finer, higher-resolution settings first. This gives
+    # PDFs that previously landed well below the target (for example ~692 KB
+    # against an 800 KB target) a chance to use more pixels while still meeting
+    # the requested limit. The existing safer ladder remains as fallback.
+    "high": [
+        (220, 98), (210, 98), (200, 97), (190, 97),
+        (180, 96), (170, 96), (160, 95), (150, 94),
+        (140, 93), (120, 90), (110, 88), (100, 85), (90, 82)
+    ],
 }
 
 
@@ -47,7 +55,7 @@ def root():
         "service": "AIToolSathi PDF Compression API",
         "status": "ok",
         "engine": "Ghostscript",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "note": "Quality-first compression; selectable text and vector content are retained where possible.",
     }
 

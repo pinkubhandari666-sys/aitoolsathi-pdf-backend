@@ -1,4 +1,4 @@
-AIToolSathi PDF Compression Backend v1.3.0
+AIToolSathi PDF Compression Backend v1.4.0
 
 Files:
 - main.py: FastAPI PDF compression API using Ghostscript
@@ -15,6 +15,7 @@ Deploy:
 
 Compression:
 - Normal and High use a gradual image-resolution/JPEG-quality ladder.
+- High v1.4 tries finer 170-220 DPI / higher JPEG-quality profiles first, so it can use more of an 800 KB target when possible.
 - The ladder is designed for scanned PDFs whose embedded images may already be around 85-175 DPI.
 - If target_kb is met, the first (highest-quality) profile that reaches it is returned.
 - If target_kb cannot be met without going below the quality floor, the smallest tested output is returned and X-Target-Reached is false.

@@ -1,35 +1,31 @@
-AIToolSathi PDF Compression Backend v1.6.0
+AIToolSathi Backend v1.7.0 — PDF + Pillow Image Compression
 
-Files:
-- main.py: FastAPI PDF compression API using Ghostscript
-- Dockerfile: installs Ghostscript and starts Uvicorn
-- requirements.txt: Python dependencies
-- render.yaml: Render deployment configuration
+This release is based on the supplied PDF backend v1.6.0. The existing
+Ghostscript /compress implementation and its Normal/High profile ladders
+are retained. Pillow adds two image endpoints used by the website:
+- POST /compress-jpeg
+- POST /compress-image
 
-Deploy:
-1. Replace the files in the ROOT of the existing GitHub backend repository.
-2. Commit the changes. Render Auto-Deploy should rebuild the existing service.
-3. Wait until Render shows Live/Deployed.
-4. Test /health; ghostscript must be true.
-5. Test /docs -> POST /compress with a PDF.
+Health:
+- GET /health returns ghostscript and pillow booleans.
+- GET /docs provides interactive API documentation.
 
-Changes in v1.6.0:
-- Ghostscript subprocess runs in a worker thread so the FastAPI event loop can continue answering /health.
-- A semaphore limits the service to one Ghostscript compression job at a time to protect the small Render free instance.
-- If no tested profile can meet the requested target, the API returns the highest-quality successful result and reports X-Target-Reached=false, rather than selecting the smallest/lowest-quality result.
-- Existing Normal/High profile settings and API form fields are preserved.
+Deployment:
+1. Back up the current backend repository first.
+2. Replace only the backend repository ROOT files with main.py,
+   requirements.txt, Dockerfile and render.yaml from this package.
+3. Commit to the main branch and wait for Render Auto-Deploy to finish.
+4. Verify /health reports ghostscript=true and pillow=true.
+5. Test /compress with a PDF and both image endpoints from /docs.
+
+Image API form fields:
+file, mode (normal|high), target_kb, max_width, max_height, quality.
+For /compress-image, output_format can be original, jpeg, png or webp.
+For /compress-jpeg, output is always JPEG.
 
 Important:
-- Target KB is a maximum size goal, not a guarantee of an exact output size.
-- If the target cannot be reached without reducing quality too much, the response may be larger than the target. Check document legibility.
-- If compression would make the file larger, the original PDF is returned.
-
-Response headers:
-- X-Original-Bytes
-- X-Compressed-Bytes
-- X-Target-Reached
-- X-Image-DPI
-- X-JPEG-Quality
-
-Note:
-Ghostscript may rewrite PDF internals and remove existing PDF encryption/permissions. Do not use this backend on password-protected or restricted files unless you have permission and have confirmed the output is acceptable.
+- Target KB is a maximum-size goal, not a guarantee.
+- PNG is lossless; quality does not reduce its color data.
+- JPEG conversion of transparent images uses a white background.
+- Upload limit defaults to 20 MB for images and 30 MB for PDFs.
+- Do not deploy until you have backed up the current v1.6 backend.

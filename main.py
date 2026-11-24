@@ -1,16 +1,19 @@
 import asyncio
+import io
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+from PIL import Image, ImageOps
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
-app = FastAPI(title="AIToolSathi PDF Compression API", version="1.6.0")
+app = FastAPI(title="AIToolSathi PDF Compression API", version="1.7.0")
 origins = [
     x.strip()
     for x in os.getenv(
@@ -52,20 +55,176 @@ PROFILES = {
 }
 
 
+IMAGE_MAX_BYTES = int(os.getenv("MAX_IMAGE_UPLOAD_MB", "20")) * 1024 * 1024
+IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+IMAGE_PROFILES = {
+    "normal": [92, 88, 84, 80, 76, 72, 68, 64, 60],
+    "high": [88, 82, 76, 70, 64, 58, 52, 46, 40],
+}
+
+def _image_bytes(image, fmt, quality):
+    out = io.BytesIO()
+    save_kwargs = {}
+    if fmt in ("JPEG", "WEBP"):
+        save_kwargs["quality"] = int(quality)
+        save_kwargs["optimize"] = True
+        if fmt == "JPEG":
+            save_kwargs["progressive"] = True
+    elif fmt == "PNG":
+        save_kwargs["optimize"] = True
+        # PNG is lossless; quality does not control its compression ratio.
+    image.save(out, format=fmt, **save_kwargs)
+    return out.getvalue()
+
+def _prepare_image(raw, output_format, max_width, max_height):
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+    except Exception as exc:
+        raise HTTPException(400, "Invalid or unsupported image file.") from exc
+    if image.format not in IMAGE_FORMATS:
+        raise HTTPException(400, "Only JPG, JPEG, PNG and WebP images are supported.")
+    original_format = image.format
+    image = ImageOps.exif_transpose(image)
+    fmt = (output_format or "original").strip().lower()
+    if fmt == "original":
+        fmt = original_format.lower()
+    if fmt in ("jpg", "jpeg"):
+        fmt = "jpeg"
+    if fmt not in ("jpeg", "png", "webp"):
+        raise HTTPException(400, "Output format must be original, jpeg, png or webp.")
+    pil_fmt = {"jpeg": "JPEG", "png": "PNG", "webp": "WEBP"}[fmt]
+
+    if max_width > 0 or max_height > 0:
+        w, h = image.size
+        if max_width > 0 and max_height > 0:
+            # Fit inside the requested box while preserving aspect ratio.
+            scale = min(max_width / w, max_height / h, 1.0)
+        elif max_width > 0:
+            scale = min(max_width / w, 1.0)
+        else:
+            scale = min(max_height / h, 1.0)
+        if scale < 1:
+            image = image.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.Resampling.LANCZOS)
+
+    if pil_fmt == "JPEG":
+        if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
+        else:
+            image = image.convert("RGB")
+    elif pil_fmt == "PNG" and image.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+        image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+    elif pil_fmt == "WEBP" and image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+    return image, pil_fmt, fmt
+
+async def _compress_image_response(
+    file: UploadFile, mode: str, target_kb: int, max_width: int,
+    max_height: int, quality: int, output_format: str, force_jpeg: bool
+):
+    if not file.filename:
+        raise HTTPException(400, "Please upload an image file.")
+    raw = await file.read(IMAGE_MAX_BYTES + 1)
+    if not raw or len(raw) > IMAGE_MAX_BYTES:
+        raise HTTPException(
+            413 if len(raw) > IMAGE_MAX_BYTES else 400,
+            f"Image must be non-empty and under {IMAGE_MAX_BYTES // (1024 * 1024)} MB."
+        )
+    if mode not in IMAGE_PROFILES:
+        raise HTTPException(400, "Mode must be normal or high.")
+    image, pil_fmt, fmt_name = _prepare_image(
+        raw, "jpeg" if force_jpeg else output_format, max_width, max_height
+    )
+    if quality < 0 or quality > 95:
+        raise HTTPException(400, "Quality must be between 0 and 95.")
+    target_bytes = target_kb * 1024 if target_kb > 0 else 0
+    qualities = [quality] if quality > 0 else IMAGE_PROFILES[mode]
+    candidates = []
+    for q in qualities:
+        data = _image_bytes(image, pil_fmt, q)
+        candidates.append((data, q))
+        if target_bytes and len(data) <= target_bytes:
+            break
+    # For a target-size request, preserve the highest-quality candidate that
+    # reaches the target. If none reaches it, return the smallest tested result.
+    if target_bytes:
+        fitting = [item for item in candidates if len(item[0]) <= target_bytes]
+        result, used_q = fitting[0] if fitting else candidates[-1]
+        reached = len(result) <= target_bytes
+    else:
+        result, used_q = candidates[0]
+        reached = True
+
+    # Never return a larger file when the source can be preserved unchanged.
+    if len(result) >= len(raw) and not (max_width or max_height) and not force_jpeg:
+        result = raw
+        fmt_name = (Image.open(io.BytesIO(raw)).format or pil_fmt).lower()
+        reached = (not target_bytes) or len(result) <= target_bytes
+    media = {"jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(fmt_name, "application/octet-stream")
+    ext = "jpg" if fmt_name == "jpeg" else fmt_name
+    headers = {
+        "X-Original-Bytes": str(len(raw)),
+        "X-Compressed-Bytes": str(len(result)),
+        "X-Target-Reached": "true" if reached else "false",
+        "X-Output-Format": media,
+        "X-Image-Quality": str(used_q),
+    }
+    return Response(
+        content=result, media_type=media, headers=headers
+    )
+
+@app.post("/compress-jpeg")
+async def compress_jpeg(
+    file: UploadFile = File(...),
+    mode: str = Form("normal"),
+    target_kb: int = Form(0),
+    max_width: int = Form(0),
+    max_height: int = Form(0),
+    quality: int = Form(0),
+):
+    return await _compress_image_response(
+        file, mode, target_kb, max_width, max_height, quality, "jpeg", True
+    )
+
+@app.post("/compress-image")
+async def compress_image(
+    file: UploadFile = File(...),
+    mode: str = Form("normal"),
+    target_kb: int = Form(0),
+    max_width: int = Form(0),
+    max_height: int = Form(0),
+    quality: int = Form(0),
+    output_format: str = Form("original"),
+):
+    return await _compress_image_response(
+        file, mode, target_kb, max_width, max_height, quality, output_format, False
+    )
+
+
+
 @app.get("/")
 def root():
     return {
         "service": "AIToolSathi PDF Compression API",
         "status": "ok",
-        "engine": "Ghostscript",
-        "version": "1.6.0",
+        "engine": "Ghostscript + Pillow",
+        "version": "1.7.0",
         "note": "Quality-first compression; selectable text and vector content are retained where possible.",
     }
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "engine": "Ghostscript", "ghostscript": shutil.which(GS) is not None}
+    return {
+        "ok": True,
+        "engine": "Ghostscript + Pillow",
+        "version": "1.7.0",
+        "ghostscript": shutil.which(GS) is not None,
+        "pillow": True,
+    }
 
 
 @app.post("/compress")
